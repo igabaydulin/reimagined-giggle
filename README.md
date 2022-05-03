@@ -105,5 +105,50 @@ MyBenchmark.remove:remove_by_remove    thrpt   25  24.144 ± 0.615  ops/us
 ```
 
 ## Conclusion
-Looks like `ConcurrentHashMap#remove(key)` is faster than `ConcurrentHashMap#compute(key, (k, v) -> null)`,
-but it's not clear why yet. Have to check the implementation.
+Here is part of the code executed by `ConcurrentHashMap#remove`
+```java
+if (tab == null || (n = tab.length) == 0 || (f = tabAt(tab, i = (n - 1) & hash)) == null)
+  break;
+```
+
+Here is part of the same logic in `ConcurrentHashMap#compute`
+```java
+Node<K,V> f; int n, i, fh;
+if (tab == null || (n = tab.length) == 0)
+  tab = initTable();
+else if ((f = tabAt(tab, i = (n - 1) & h)) == null) {
+  Node<K,V> r = new ReservationNode<K,V>();
+  synchronized (r) {
+    if (casTabAt(tab, i, null, r)) {
+      binCount = 1;
+      Node<K,V> node = null;
+      try {
+        if ((val = remappingFunction.apply(key, null)) != null) {
+          delta = 1;
+          node = new Node<K,V>(h, key, val);
+        }
+      } finally {
+        setTabAt(tab, i, node);
+      }
+    }
+  }
+  if (binCount != 0)
+    break;
+}
+```
+
+If `ConcurrentHashMap` is missing the key then `ConcurrentHashMap#remove` will return `null`
+immediately. But `ConcurrentHashMap#compute` will run synchronisation block first and only after
+that will get the result of supplied function. If we knew that the supplied function will
+return `null` we wouldn't need a synchronisation block, and we could return `null` right away as it
+was done in `ConcurrentHashMap#remove`. The problem is we would have to invoke the supplied function
+before synchronisation block and if the result is not `null` we may get an outdated result because
+other thread could put a new value. In this case we would have to rerun the supplied function with
+an updated value, but it violates the guarantee that `ConcurrentHashMap#compute` runs supplied
+function only once. From `ConcurrentHashMap#compute` Javadoc: 
+
+> Attempts to compute a mapping for the specified key and its current mapped value 
+> (or null if there is no current mapping). The entire method invocation is performed atomically. 
+> The supplied function is invoked exactly once per invocation of this method. 
+> Some attempted update operations on this map by other threads may be blocked while computation 
+> is in progress, so the computation should be short and simple.
